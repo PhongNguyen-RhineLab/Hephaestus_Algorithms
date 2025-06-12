@@ -1,0 +1,56 @@
+Thuật toán 1: Hephaestus Main Framework (Tổng thể)
+    Sẽ được tổ chức như một hàm chính điều phối các giai đoạn con.
+    Mức độ triển khai: 90%.
+        Đánh giá: Logic điều phối tổng thể của framework, bao gồm trình tự các giai đoạn Forge, Morph, và Refine, cũng như vòng lặp tự củng cố
+        (ví dụ: "Retraining Morph after episode 5..."), đã được triển khai đầy đủ.
+        Hàm hephaestus_main_framework quản lý luồng này. Các thành phần chính của framework đã được mô tả và triển khai theo các giai đoạn
+
+Thuật toán 2: Forge (Giai đoạn 1)
+    Bao gồm huấn luyện SPAGAN (sẽ là mô phỏng) và PPS.
+    Mức độ triển khai: 90%.
+        Đánh giá: Giai đoạn này được triển khai thông qua việc gọi hàm predictive_path_stressing.
+        Mục tiêu chính của Forge là tạo ra tập dữ liệu giải pháp khả thi ban đầu.
+        Logic của việc xác định các cặp vi phạm, tối ưu hóa hàm tiềm năng mềm và cập nhật vector nhiễu đã được triển khai chi tiết.
+
+Thuật toán 3: SPAGAN Training
+    Sẽ được mô phỏng.
+    Mức độ triển khai: 10% (mô phỏng).
+        Đánh giá: Trong code, mock_spagan_model chỉ là một mô phỏng đơn giản của mô hình SPAGAN.
+        Mô hình SPAGAN thực tế là một mạng nơ-ron đồ thị (GNN) phức tạp, cần được huấn luyện trên dữ liệu lớn để ước tính chi phí đường đi.
+        Quá trình huấn luyện thực tế của SPAGAN (Train_SPAGAN trong Algorithm 3 của tài liệu bổ sung) không được triển khai mà chỉ được giả lập bằng một hàm heuristic.
+
+Thuật toán 4: Predictive Path Stressing (PPS)
+    Được triển khai chi tiết.
+    Mức độ triển khai: 85%.
+        Đánh giá: Thuật toán này được triển khai chi tiết trong hàm predictive_path_stressing.
+        Các bước chính như khởi tạo, xác định cặp vi phạm, lặp lại tối ưu hóa hàm tiềm năng mềm, và cập nhật vector nhiễu đã được thực hiện.
+        Tuy nhiên, việc "SPAGANPath" (tìm đường đi ngắn nhất theo ước tính của SPAGAN) được mô phỏng bằng cách sử dụng Dijkstra trên đồ thị với trọng số ước tính, có thể không hoàn toàn phản ánh cách SPAGAN thực tế xác định đường đi.
+
+Thuật toán 5: Morph (Giai đoạn 2)
+    Bao gồm EBM và Mix-CVAE. Sẽ được mô phỏng một phần.
+    Mức độ triển khai: 15% (mô phỏng).
+        Đánh giá: Giai đoạn Morph liên quan đến việc huấn luyện EBM và Mix-CVAE để mô hình hóa phân phối giải pháp.
+        Code chỉ cung cấp các lớp MockEBM và MockMixCVAE với các phương thức rất đơn giản (ví dụ: energy, sample_latent, decode chỉ trả về các giá trị ngẫu nhiên hoặc tính toán heuristic).
+        Quá trình huấn luyện minimax phức tạp và chiến lược thêm expert được mô phỏng rất sơ bộ, không có các thuật toán học sâu thực tế.
+
+Thuật toán 6: Refine (Giai đoạn 3)
+    Bao gồm tối ưu hóa RL trong không gian tiềm ẩn và PPS-I. Sẽ được mô phỏng một phần.
+    Mức độ triển khai: 20% (mô phỏng).
+        Đánh giá: Giai đoạn Refine tập trung vào học tăng cường trong không gian tiềm ẩn.
+        Code chỉ cung cấp một mock_rl_policy rất cơ bản.
+        Quá trình học tăng cường thực tế (cập nhật chính sách, sử dụng replay buffer, tính toán hàm phần thưởng phức tạp) chỉ được mô phỏng ở mức độ cao.
+        Hàm phần thưởng được mô phỏng đơn giản.
+
+Thuật toán 7: Inference Process
+    Sẽ là một hàm để thực hiện suy luận cuối cùng bằng cách sử dụng các mô hình đã huấn luyện (hoặc mô phỏng) và PPS-I.
+    Mức độ triển khai: 80%.
+        Đánh giá: Quy trình suy luận đã được triển khai trong hàm inference_process.
+        Các bước lấy mẫu latent vector, lặp lại quá trình tinh chỉnh bằng chính sách RL đã học (mô phỏng), và tinh chỉnh cuối cùng bằng PPS-I đã được thực hiện.
+        Các mô hình trained_omega và trained_pi (Mix-CVAE và RL policy) vẫn là mô phỏng, nhưng luồng điều khiển của quy trình suy luận đã có.
+
+Thuật toán 8: Predictive Path Stressing - Inference (PPS-I)
+    Được triển khai chi tiết.
+    Mức độ triển khai: 95%.
+        Đánh giá: Thuật toán này được triển khai rất chi tiết trong hàm predictive_path_stressing_inference.
+        Nó sử dụng Dijkstra chính xác (không qua SPAGAN) để đảm bảo tính khả thi 100%, đúng như mô tả trong bài báo.
+        Logic của việc xác định cặp vi phạm, tối ưu hóa hàm tiềm năng mềm và cập nhật vector nhiễu đã được thực hiện đầy đủ và chính xác.
