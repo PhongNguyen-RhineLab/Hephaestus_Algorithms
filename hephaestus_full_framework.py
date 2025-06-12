@@ -374,8 +374,14 @@ def morph_phase(D_sol, K_max_morph_iter=100, N_initial_experts=1):
         # 2. Update Mix-CVAE (omega_mix_cvae)
         # Tính ELBO cho x_real_rand_vec và c_vec
         # (Ở đây, omega_mix_cvae sẽ điều chỉnh trọng số của nó để ELBO tối ưu)
-        reconstructed_x_real, mu, logvar = omega_mix_cvae.forward(x_real_rand_vec, c_vec)
-        elbo_loss, recon_loss, kl_loss = omega_mix_cvae.loss_function(reconstructed_x_real, x_real_rand_vec, mu, logvar)
+        # Lấy một expert CVAE từ hỗn hợp để tính ELBO
+        # (Trong thực tế, một mạng gating sẽ chọn expert phù hợp nhất)
+        # Trong mô phỏng này, chúng ta sẽ chọn một expert ngẫu nhiên để minh họa Mix-CVAE
+        active_expert = random.choice(omega_mix_cvae.experts)
+
+        # Thực hiện forward pass trên expert đã chọn
+        reconstructed_x_real, mu, logvar = active_expert.forward(x_real_rand_vec, c_vec)
+        elbo_loss, recon_loss, kl_loss = active_expert.loss_function(reconstructed_x_real, x_real_rand_vec, mu, logvar, c_context) # Pass c_context to loss_function
 
         # Thêm energy penalty: L_Omega_guide = L_Omega_ELBO + lambda * E_generated[E_ebm(x)]
         # x_generated = omega_mix_cvae.decode(z_generated_from_prior, c)
