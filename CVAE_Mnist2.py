@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import StepLR
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend for saving
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import os
 
@@ -15,7 +15,6 @@ def show_reconstruction(x, x_recon, num_images=10, save_path=None):
         x = x.view(-1, 28, 28).detach().cpu().numpy()
         x_recon = x_recon.view(-1, 28, 28).detach().cpu().numpy()
 
-        # Limit num_images to available samples
         num_images = min(num_images, x.shape[0], x_recon.shape[0])
         if num_images == 0:
             print(f"Warning: No images to visualize (x.shape: {x.shape}, x_recon.shape: {x_recon.shape})")
@@ -23,14 +22,12 @@ def show_reconstruction(x, x_recon, num_images=10, save_path=None):
 
         plt.figure(figsize=(num_images * 2, 4))
         for i in range(num_images):
-            # Original
             plt.subplot(2, num_images, i + 1)
             plt.imshow(x[i], cmap='gray')
             plt.axis('off')
             if i == 0:
                 plt.title("Gốc")
 
-            # Reconstructed
             plt.subplot(2, num_images, i + 1 + num_images)
             plt.imshow(x_recon[i], cmap='gray')
             plt.axis('off')
@@ -41,7 +38,7 @@ def show_reconstruction(x, x_recon, num_images=10, save_path=None):
         if save_path:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             plt.savefig(save_path, bbox_inches='tight')
-            print(f"Saved image to {os.path.abspath(save_path)}")
+            print(f"Saved image to {save_path}")
         plt.close()
     except Exception as e:
         print(f"Error in show_reconstruction: {e}")
@@ -100,11 +97,22 @@ class CVAE_Encoder(nn.Module):
         self.fc1 = nn.Linear(input_dim + cond_dim, hidden_dim)
         self.fc_mu = nn.Linear(hidden_dim, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.xavier_uniform_(self.fc1.weight)
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.xavier_uniform_(self.fc_mu.weight)
+        nn.init.zeros_(self.fc_mu.bias)
+        nn.init.xavier_uniform_(self.fc_logvar.weight)
+        nn.init.zeros_(self.fc_logvar.bias)
 
     def forward(self, x, c):
         xc = torch.cat([x, c], dim=1)
         h = F.relu(self.fc1(xc))
-        return self.fc_mu(h), self.fc_logvar(h)
+        mu = self.fc_mu(h)
+        logvar = self.fc_logvar(h).clamp(min=-10, max=10)  # Clamp logvar
+        return mu, logvar
 
 # --- Prior ---
 class CVAE_Prior(nn.Module):
@@ -113,10 +121,21 @@ class CVAE_Prior(nn.Module):
         self.fc1 = nn.Linear(cond_dim, hidden_dim)
         self.fc_mu = nn.Linear(hidden_dim, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.xavier_uniform_(self.fc1.weight)
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.xavier_uniform_(self.fc_mu.weight)
+        nn.init.zeros_(self.fc_mu.bias)
+        nn.init.xavier_uniform_(self.fc_logvar.weight)
+        nn.init.zeros_(self.fc_logvar.bias)
 
     def forward(self, c):
         h = F.relu(self.fc1(c))
-        return self.fc_mu(h), self.fc_logvar(h)
+        mu = self.fc_mu(h)
+        logvar = self.fc_logvar(h).clamp(min=-10, max=10)
+        return mu, logvar
 
 # --- Decoder ---
 class CVAE_Decoder(nn.Module):
@@ -124,11 +143,18 @@ class CVAE_Decoder(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(latent_dim + cond_dim, hidden_dim)
         self.fc_out = nn.Linear(hidden_dim, output_dim)
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.xavier_uniform_(self.fc1.weight)
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.xavier_uniform_(self.fc_out.weight)
+        nn.init.zeros_(self.fc_out.bias)
 
     def forward(self, z, c):
         zc = torch.cat([z, c], dim=1)
         h = F.relu(self.fc1(zc))
-        return self.fc_out(h)
+        return torch.sigmoid(self.fc_out(h))  # Normalize output to [0, 1]
 
 # --- CVAE Full Model ---
 class CVAE(nn.Module):
@@ -163,6 +189,12 @@ def cvae_loss(x, output, beta=0.1):
     mu_prior = output['mu_prior']
     logvar_prior = output['logvar_prior']
 
+    # Debug for NaN
+    if torch.isnan(x_recon).any() or torch.isnan(x).any():
+        print("NaN detected in x_recon or x")
+    if torch.isnan(mu).any() or torch.isnan(logvar).any():
+        print("NaN detected in mu or logvar")
+
     recon_loss = F.mse_loss(x_recon, x, reduction='mean')
     kl = -0.5 * torch.sum(
         1 + (logvar - logvar_prior) - ((mu - mu_prior) ** 2 + logvar.exp()) / (logvar_prior.exp() + 1e-10)
@@ -191,13 +223,12 @@ latent_dim = 64
 # Initialize model
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = CVAE(input_dim=input_dim, cond_dim=cond_dim, hidden_dim=hidden_dim, latent_dim=latent_dim).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 scheduler = StepLR(optimizer, step_size=10, gamma=0.5)
 
 # Create output directory
 save_dir = r'D:\Coding Project\Hephaestus_Algorithms\reconstructions'
 os.makedirs(save_dir, exist_ok=True)
-print(f"Working directory: {os.getcwd()}")
 print(f"Saving images to: {save_dir}")
 
 # Training loop
@@ -217,8 +248,13 @@ for epoch in range(50):
         output = model(x_tensor, c_tensor)
         loss, recon_loss, kl_loss = cvae_loss(x_tensor, output, beta=0.1)
 
+        if torch.isnan(loss):
+            print(f"NaN loss detected at epoch {epoch+1}, batch {count+1}")
+            continue
+
         optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
         optimizer.step()
 
         total_loss += loss.item()
@@ -228,14 +264,13 @@ for epoch in range(50):
 
     scheduler.step()
 
-    # Visualization
     with torch.no_grad():
         print(f"[Epoch {epoch+1}] x_tensor shape: {x_tensor.shape}, x_recon shape: {output['x_recon'].shape}, k: {k.item()}")
         num_images = min(k.item(), k_max)
         if num_images > 0:
             original_images = x_tensor.view(-1, k_max, 784)[:, :num_images].reshape(-1, 784)[:num_images]
             reconstructed_images = output['x_recon'].view(-1, k_max, 784)[:, :num_images].reshape(-1, 784)[:num_images]
-            save_path = os.path.join(save_dir, f'reconstruction_epoch_{epoch + 1}.png')
+            save_path = os.path.normpath(os.path.join(save_dir, f'reconstruction_epoch_{epoch + 1}.png'))
             show_reconstruction(original_images, reconstructed_images, num_images=num_images, save_path=save_path)
         else:
             print(f"[Epoch {epoch+1}] Skipping visualization: no clusters to display")
