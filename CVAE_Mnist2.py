@@ -190,13 +190,30 @@ class CVAE(nn.Module):
         }
 
 # --- Loss ---
-def cvae_loss(x, output, beta=0.01):
-    x_recon = output['x_recon']
+def cvae_loss(x, output, cluster_points, k, k_max=10, n_max=50, D=784, beta=0.01):
+    """
+    Compute CVAE loss with k-medians clustering cost.
+
+    Args:
+        x (torch.Tensor): Input centroids [batch_size, k_max * D]
+        output (dict): Model output containing 'x_recon', 'mu', 'logvar', 'mu_prior', 'logvar_prior'
+        cluster_points (list): List of cluster points per batch [batch_size, list of k tensors of shape [n_i, D]]
+        k (torch.Tensor): Number of clusters per batch [batch_size]
+        k_max (int): Maximum number of clusters
+        n_max (int): Maximum number of points per cluster
+        D (int): Dimension of each point (784 for MNIST)
+        beta (float): Weight for KL divergence
+
+    Returns:
+        tuple: (total_loss, recon_loss, kl_loss)
+    """
+    x_recon = output['x_recon']  # [batch_size, k_max * D]
     mu = output['mu']
     logvar = output['logvar']
     mu_prior = output['mu_prior']
     logvar_prior = output['logvar_prior']
 
+    # Check for NaN/Inf
     if torch.isnan(x_recon).any() or torch.isnan(x).any():
         print("NaN detected in x_recon or x")
     if torch.isinf(x_recon).any() or torch.isinf(x).any():
@@ -204,12 +221,50 @@ def cvae_loss(x, output, beta=0.01):
     if torch.isnan(mu).any() or torch.isnan(logvar).any():
         print("NaN detected in mu or logvar")
 
-    recon_loss = F.mse_loss(x_recon, x, reduction='mean')
+    batch_size = x.size(0)
+
+    # Reshape reconstructed centroids to [batch_size, k_max, D]
+    x_recon = x_recon.view(batch_size, k_max, D)
+
+    # Compute k-medians clustering cost
+    total_cost = 0.0
+    total_points = 0
+
+    for b in range(batch_size):
+        k_b = k[b].item()  # Number of clusters in this batch
+        if k_b == 0:
+            continue  # Skip empty batches
+
+        for i in range(k_b):
+            points = cluster_points[b][i]  # [n_i, D]
+            n_i = min(points.size(0), n_max)
+            if n_i == 0:
+                continue  # Skip empty clusters
+
+            # Get reconstructed centroid for cluster i
+            centroid_recon = x_recon[b, i, :]  # [D]
+
+            # Compute unsquared Euclidean distances to reconstructed centroid
+            distances = torch.norm(points[:n_i] - centroid_recon, dim=1, p=2)
+
+            # k-medians: sum of unsquared distances
+            cluster_cost = torch.sum(distances)
+
+            total_cost += cluster_cost
+            total_points += n_i
+
+    # Average cost over all points
+    recon_loss = total_cost / max(total_points, 1) if total_points > 0 else torch.tensor(0.0, device=x.device)
+
+    # KL Divergence
     kl = -0.5 * torch.sum(
         1 + (logvar - logvar_prior) - ((mu - mu_prior) ** 2 + torch.exp(logvar)) / (torch.exp(logvar_prior) + 1e-5)
     ) / x.size(0)
 
-    return recon_loss + beta * kl, recon_loss, kl
+    # Total loss
+    total_loss = recon_loss + beta * kl
+
+    return total_loss, recon_loss, kl
 
 # --- Load MNIST ---
 transform = transforms.Compose([
@@ -246,6 +301,7 @@ patience = 10
 trigger_times = 0
 
 # Training loop
+# Inside the training loop
 for epoch in range(100):
     model.train()
     total_loss = 0
@@ -260,7 +316,10 @@ for epoch in range(100):
         x_tensor, c_tensor = x_tensor.to(device), c_tensor.to(device)
 
         output = model(x_tensor, c_tensor)
-        loss, recon_loss, kl_loss = cvae_loss(x_tensor, output, beta=0.01)
+        # Use k-medians loss
+        loss, recon_loss, kl_loss = cvae_loss(
+            x_tensor, output, cluster_points, k, k_max=k_max, n_max=n_max, D=D, beta=0.01
+        )
 
         if torch.isnan(loss) or torch.isinf(loss):
             print(f"NaN or Inf loss detected at epoch {epoch+1}, batch {count+1}")
