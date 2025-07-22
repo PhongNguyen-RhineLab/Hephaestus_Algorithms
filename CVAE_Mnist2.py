@@ -6,9 +6,13 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import StepLR
 import numpy as np
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import os
+import pandas as pd
+from datetime import datetime
+
 
 def show_reconstruction(x, x_recon, num_images=10, save_path=None):
     try:
@@ -26,13 +30,13 @@ def show_reconstruction(x, x_recon, num_images=10, save_path=None):
             plt.imshow(x[i], cmap='gray')
             plt.axis('off')
             if i == 0:
-                plt.title("Gốc")
+                plt.title("Original")
 
             plt.subplot(2, num_images, i + 1 + num_images)
             plt.imshow(x_recon[i], cmap='gray')
             plt.axis('off')
             if i == 0:
-                plt.title("Tái tạo")
+                plt.title("Reconstructed")
 
         plt.tight_layout()
         if save_path:
@@ -42,6 +46,7 @@ def show_reconstruction(x, x_recon, num_images=10, save_path=None):
         plt.close()
     except Exception as e:
         print(f"Error in show_reconstruction: {e}")
+
 
 def prepare_cluster_batch(images, labels, k_max=10, n_max=50):
     D = images.size(1)
@@ -64,6 +69,7 @@ def prepare_cluster_batch(images, labels, k_max=10, n_max=50):
     k_tensor = torch.tensor([k_count])
 
     return centroids, clusters, k_tensor
+
 
 def process_cluster_data(centroids, cluster_points, k, k_max=10, n_max=50, D=784):
     batch_size = centroids.size(0)
@@ -90,7 +96,25 @@ def process_cluster_data(centroids, cluster_points, k, k_max=10, n_max=50, D=784
 
     return x_tensor, c_tensor
 
-# --- Encoder ---
+
+def k_medians_cost(images, labels, centroids, k, k_max=10):
+    """Calculate k-medians clustering cost based on the paper's definition."""
+    device = images.device
+    cost = 0.0
+    valid_centroids = centroids.view(-1, k_max, 784)[:, :k.item()].reshape(-1, 784)
+
+    if valid_centroids.size(0) == 0:
+        return 0.0
+
+    for img in images:
+        # Compute L2 distances to all valid centroids
+        distances = torch.norm(valid_centroids - img.unsqueeze(0), dim=1, p=2)
+        # Take the minimum distance
+        cost += torch.min(distances)
+
+    return cost.item()
+
+
 class CVAE_Encoder(nn.Module):
     def __init__(self, input_dim, cond_dim, hidden_dim, latent_dim):
         super().__init__()
@@ -111,10 +135,10 @@ class CVAE_Encoder(nn.Module):
         xc = torch.cat([x, c], dim=1)
         h = F.relu(self.fc1(xc))
         mu = self.fc_mu(h)
-        logvar = self.fc_logvar(h).clamp(min=-10, max=10)  # Clamp logvar
+        logvar = self.fc_logvar(h).clamp(min=-10, max=10)
         return mu, logvar
 
-# --- Prior ---
+
 class CVAE_Prior(nn.Module):
     def __init__(self, cond_dim, hidden_dim, latent_dim):
         super().__init__()
@@ -137,7 +161,7 @@ class CVAE_Prior(nn.Module):
         logvar = self.fc_logvar(h).clamp(min=-10, max=10)
         return mu, logvar
 
-# --- Decoder ---
+
 class CVAE_Decoder(nn.Module):
     def __init__(self, latent_dim, cond_dim, hidden_dim, output_dim):
         super().__init__()
@@ -154,9 +178,9 @@ class CVAE_Decoder(nn.Module):
     def forward(self, z, c):
         zc = torch.cat([z, c], dim=1)
         h = F.relu(self.fc1(zc))
-        return torch.sigmoid(self.fc_out(h))  # Normalize output to [0, 1]
+        return torch.sigmoid(self.fc_out(h))
 
-# --- CVAE Full Model ---
+
 class CVAE(nn.Module):
     def __init__(self, input_dim, cond_dim, hidden_dim, latent_dim):
         super().__init__()
@@ -181,7 +205,7 @@ class CVAE(nn.Module):
             'z': z,
         }
 
-# --- Loss ---
+
 def cvae_loss(x, output, beta=0.1):
     x_recon = output['x_recon']
     mu = output['mu']
@@ -189,7 +213,6 @@ def cvae_loss(x, output, beta=0.1):
     mu_prior = output['mu_prior']
     logvar_prior = output['logvar_prior']
 
-    # Debug for NaN
     if torch.isnan(x_recon).any() or torch.isnan(x).any():
         print("NaN detected in x_recon or x")
     if torch.isnan(mu).any() or torch.isnan(logvar).any():
@@ -202,7 +225,8 @@ def cvae_loss(x, output, beta=0.1):
 
     return recon_loss + beta * kl, recon_loss, kl
 
-# --- Load MNIST ---
+
+# Load MNIST
 transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Lambda(lambda x: x.view(-1))
@@ -231,12 +255,17 @@ save_dir = r'D:\Coding Project\Hephaestus_Algorithms\reconstructions'
 os.makedirs(save_dir, exist_ok=True)
 print(f"Saving images to: {save_dir}")
 
+# Initialize CSV logging
+csv_path = os.path.normpath(os.path.join(save_dir, f'training_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'))
+results = []
+
 # Training loop
 for epoch in range(50):
     model.train()
     total_loss = 0
     recon_loss_total = 0
     kl_loss_total = 0
+    k_medians_cost_total = 0
     count = 0
 
     for images, labels in train_loader:
@@ -249,13 +278,17 @@ for epoch in range(50):
         loss, recon_loss, kl_loss = cvae_loss(x_tensor, output, beta=0.1)
 
         if torch.isnan(loss):
-            print(f"NaN loss detected at epoch {epoch+1}, batch {count+1}")
+            print(f"NaN loss detected at epoch {epoch + 1}, batch {count + 1}")
             continue
 
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
+
+        # Compute k-medians cost
+        k_medians_cost_value = k_medians_cost(images, labels, output['x_recon'], k, k_max=k_max)
+        k_medians_cost_total += k_medians_cost_value
 
         total_loss += loss.item()
         recon_loss_total += recon_loss.item()
@@ -265,7 +298,8 @@ for epoch in range(50):
     scheduler.step()
 
     with torch.no_grad():
-        print(f"[Epoch {epoch+1}] x_tensor shape: {x_tensor.shape}, x_recon shape: {output['x_recon'].shape}, k: {k.item()}")
+        print(
+            f"[Epoch {epoch + 1}] x_tensor shape: {x_tensor.shape}, x_recon shape: {output['x_recon'].shape}, k: {k.item()}")
         num_images = min(k.item(), k_max)
         if num_images > 0:
             original_images = x_tensor.view(-1, k_max, 784)[:, :num_images].reshape(-1, 784)[:num_images]
@@ -273,6 +307,20 @@ for epoch in range(50):
             save_path = os.path.normpath(os.path.join(save_dir, f'reconstruction_epoch_{epoch + 1}.png'))
             show_reconstruction(original_images, reconstructed_images, num_images=num_images, save_path=save_path)
         else:
-            print(f"[Epoch {epoch+1}] Skipping visualization: no clusters to display")
+            print(f"[Epoch {epoch + 1}] Skipping visualization: no clusters to display")
 
-    print(f"[Epoch {epoch+1}] Loss: {total_loss / count:.4f}, Recon: {recon_loss_total / count:.4f}, KL: {kl_loss_total / count:.4f}")
+    # Log results for this epoch
+    epoch_results = {
+        'Epoch': epoch + 1,
+        'Total_Loss': total_loss / count if count > 0 else 0.0,
+        'Recon_Loss': recon_loss_total / count if count > 0 else 0.0,
+        'KL_Loss': kl_loss_total / count if count > 0 else 0.0,
+        'k_medians_Cost': k_medians_cost_total / count if count > 0 else 0.0
+    }
+    results.append(epoch_results)
+
+    # Save to CSV
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(csv_path, index=False)
+    print(
+        f"[Epoch {epoch + 1}] Loss: {total_loss / count:.4f}, Recon: {recon_loss_total / count:.4f}, KL: {kl_loss_total / count:.4f}, k-medians Cost: {k_medians_cost_total / count:.4f}, Saved to {csv_path}")
