@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import StepLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -111,7 +111,7 @@ class CVAE_Encoder(nn.Module):
         xc = torch.cat([x, c], dim=1)
         h = F.relu(self.fc1(xc))
         mu = self.fc_mu(h)
-        logvar = self.fc_logvar(h).clamp(min=-10, max=10)  # Clamp logvar
+        logvar = self.fc_logvar(h).clamp(min=-10, max=10)
         return mu, logvar
 
 # --- Prior ---
@@ -141,20 +141,28 @@ class CVAE_Prior(nn.Module):
 class CVAE_Decoder(nn.Module):
     def __init__(self, latent_dim, cond_dim, hidden_dim, output_dim):
         super().__init__()
-        self.fc1 = nn.Linear(latent_dim + cond_dim, hidden_dim)
-        self.fc_out = nn.Linear(hidden_dim, output_dim)
+        self.fc1 = nn.Linear(latent_dim + cond_dim, hidden_dim * 2)
+        self.fc2 = nn.Linear(hidden_dim * 2, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.fc_out = nn.Linear(hidden_dim // 2, output_dim)
         self._init_weights()
 
     def _init_weights(self):
         nn.init.xavier_uniform_(self.fc1.weight)
         nn.init.zeros_(self.fc1.bias)
+        nn.init.xavier_uniform_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
+        nn.init.xavier_uniform_(self.fc3.weight)
+        nn.init.zeros_(self.fc3.bias)
         nn.init.xavier_uniform_(self.fc_out.weight)
         nn.init.zeros_(self.fc_out.bias)
 
     def forward(self, z, c):
         zc = torch.cat([z, c], dim=1)
         h = F.relu(self.fc1(zc))
-        return torch.sigmoid(self.fc_out(h))  # Normalize output to [0, 1]
+        h = F.relu(self.fc2(h))
+        h = F.relu(self.fc3(h))
+        return torch.sigmoid(self.fc_out(h))
 
 # --- CVAE Full Model ---
 class CVAE(nn.Module):
@@ -182,22 +190,23 @@ class CVAE(nn.Module):
         }
 
 # --- Loss ---
-def cvae_loss(x, output, beta=0.1):
+def cvae_loss(x, output, beta=0.01):
     x_recon = output['x_recon']
     mu = output['mu']
     logvar = output['logvar']
     mu_prior = output['mu_prior']
     logvar_prior = output['logvar_prior']
 
-    # Debug for NaN
     if torch.isnan(x_recon).any() or torch.isnan(x).any():
         print("NaN detected in x_recon or x")
+    if torch.isinf(x_recon).any() or torch.isinf(x).any():
+        print("Inf detected in x_recon or x")
     if torch.isnan(mu).any() or torch.isnan(logvar).any():
         print("NaN detected in mu or logvar")
 
     recon_loss = F.mse_loss(x_recon, x, reduction='mean')
     kl = -0.5 * torch.sum(
-        1 + (logvar - logvar_prior) - ((mu - mu_prior) ** 2 + logvar.exp()) / (logvar_prior.exp() + 1e-10)
+        1 + (logvar - logvar_prior) - ((mu - mu_prior) ** 2 + torch.exp(logvar)) / (torch.exp(logvar_prior) + 1e-5)
     ) / x.size(0)
 
     return recon_loss + beta * kl, recon_loss, kl
@@ -205,7 +214,7 @@ def cvae_loss(x, output, beta=0.1):
 # --- Load MNIST ---
 transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Lambda(lambda x: x.view(-1))
+    transforms.Lambda(lambda x: x.view(-1) / 255.0)
 ])
 
 mnist_train = datasets.MNIST(root='./data', train=True, transform=transform, download=True)
@@ -217,22 +226,27 @@ n_max = 50
 D = 784
 input_dim = k_max * D
 cond_dim = k_max * n_max * D + k_max + 1
-hidden_dim = 512
-latent_dim = 64
+hidden_dim = 1024
+latent_dim = 512  # Increased to 512
 
 # Initialize model
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = CVAE(input_dim=input_dim, cond_dim=cond_dim, hidden_dim=hidden_dim, latent_dim=latent_dim).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-scheduler = StepLR(optimizer, step_size=10, gamma=0.5)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
+scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
 
 # Create output directory
 save_dir = r'D:\Coding Project\Hephaestus_Algorithms\reconstructions'
 os.makedirs(save_dir, exist_ok=True)
 print(f"Saving images to: {save_dir}")
 
+# Early stopping
+best_recon_loss = float('inf')
+patience = 10
+trigger_times = 0
+
 # Training loop
-for epoch in range(50):
+for epoch in range(100):
     model.train()
     total_loss = 0
     recon_loss_total = 0
@@ -246,15 +260,15 @@ for epoch in range(50):
         x_tensor, c_tensor = x_tensor.to(device), c_tensor.to(device)
 
         output = model(x_tensor, c_tensor)
-        loss, recon_loss, kl_loss = cvae_loss(x_tensor, output, beta=0.1)
+        loss, recon_loss, kl_loss = cvae_loss(x_tensor, output, beta=0.01)
 
-        if torch.isnan(loss):
-            print(f"NaN loss detected at epoch {epoch+1}, batch {count+1}")
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"NaN or Inf loss detected at epoch {epoch+1}, batch {count+1}")
             continue
 
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         total_loss += loss.item()
@@ -262,7 +276,17 @@ for epoch in range(50):
         kl_loss_total += kl_loss.item()
         count += 1
 
-    scheduler.step()
+    scheduler.step(recon_loss_total / count)  # Adjust LR based on recon loss
+
+    avg_recon_loss = recon_loss_total / count
+    if avg_recon_loss < best_recon_loss:
+        best_recon_loss = avg_recon_loss
+        trigger_times = 0
+    else:
+        trigger_times += 1
+        if trigger_times >= patience:
+            print(f"Early stopping triggered at epoch {epoch+1}")
+            break
 
     with torch.no_grad():
         print(f"[Epoch {epoch+1}] x_tensor shape: {x_tensor.shape}, x_recon shape: {output['x_recon'].shape}, k: {k.item()}")
