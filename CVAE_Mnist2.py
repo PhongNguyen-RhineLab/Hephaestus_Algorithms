@@ -121,32 +121,66 @@ def process_cluster_data(centroids, cluster_points, k, k_max=10, n_max=50, D=784
 
 
 def k_medians_cost(images, labels, centroids, k, k_max=10):
-    """Calculate k-medians clustering cost based on the paper's definition."""
+    """
+    Calculate k-medians clustering cost for a minibatch.
+    Args:
+        images: (B, D)
+        labels: (B,)
+        centroids: (B, k_max*D) or (B, k_max, D)
+        k: (B,)
+    Returns:
+        cost: scalar float
+    """
     device = images.device
-    cost = 0.0
-    valid_centroids = centroids.view(-1, k_max, 784)[:, :k.item()].reshape(-1, 784)
-    if valid_centroids.size(0) == 0:
-        print(f"Warning: No valid centroids for batch, k={k.item()}")
-        return 0.0
-    for img in images:
+    B, D = images.shape
+
+    # If centroids are flattened, reshape them
+    if centroids.dim() == 2:
+        centroids = centroids.view(B, k_max, D)
+
+    total_cost = 0.0
+
+    for b in range(B):
+        k_b = k[b].item()
+        if k_b == 0:
+            continue
+
+        valid_centroids = centroids[b, :k_b]  # (k_b, D)
+        img = images[b]                       # (D,)
+
+        # Euclidean distance from img to all centroids
         distances = torch.norm(valid_centroids - img.unsqueeze(0), dim=1, p=2)
-        cost += torch.min(distances)
-    return cost.item()
+        total_cost += torch.min(distances).item()
+
+    return total_cost
+
 
 def compute_total_k_medians_cost(data_loader, model, k_max, n_max, D, device):
-    """Compute total k-medians cost over the entire dataset."""
+    """
+    Compute total k-medians cost over the entire dataset.
+    Uses model reconstructions as centroids.
+    """
     model.eval()
     total_cost = 0.0
+
     with torch.no_grad():
         for images, labels in data_loader:
             images, labels = images.to(device), labels.to(device)
+
+            # Prepare data per-sample
             centroids, cluster_points, k = prepare_cluster_batch(images, labels, k_max, n_max)
             x_tensor, c_tensor = process_cluster_data(centroids, cluster_points, k, k_max, n_max, D)
+
+            # Forward pass
             output = model(x_tensor.to(device), c_tensor.to(device))
-            cost = k_medians_cost(images, labels, output['x_recon'], k, k_max)
-            total_cost += cost
+
+            # Compute cost per batch
+            batch_cost = k_medians_cost(images, labels, output['x_recon'], k, k_max)
+            total_cost += batch_cost
+
     model.train()
     return total_cost
+
 
 def compute_ground_truth_cost(data_loader, k_max=10, device='cuda'):
     """Compute k-medians cost using ground-truth centroids (mean of each class)."""
@@ -340,8 +374,11 @@ for epoch in range(100):  # Increased epochs
     total_k_medians_cost = compute_total_k_medians_cost(train_loader, model, k_max, n_max, D, device)
     # Log centroid norms for debugging
     with torch.no_grad():
-        centroid_norms = torch.norm(output['x_recon'].view(-1, k_max, 784)[:, :k.item()], dim=2)
-        print(f"[Epoch {epoch+1}] x_tensor shape: {x_tensor.shape}, x_recon shape: {output['x_recon'].shape}, k: {k.item()}, Centroid norms: {centroid_norms}")
+        x_recon_batch = output['x_recon'].view(-1, k_max, D)
+        centroid_norms = []
+        for b in range(x_recon_batch.size(0)):
+            centroid_norms.append(torch.norm(x_recon_batch[b, :k[b]], dim=1).cpu())
+        print(f"[Epoch {epoch + 1}] Example centroid norms (first batch entry): {centroid_norms[0]}")
     num_images = min(k.item(), k_max)
     if num_images > 0:
         original_images = x_tensor.view(-1, k_max, 784)[:, :num_images].reshape(-1, 784)[:num_images]
