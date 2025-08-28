@@ -379,14 +379,19 @@ for epoch in range(100):  # Increased epochs
         for b in range(x_recon_batch.size(0)):
             centroid_norms.append(torch.norm(x_recon_batch[b, :k[b]], dim=1).cpu())
         print(f"[Epoch {epoch + 1}] Example centroid norms (first batch entry): {centroid_norms[0]}")
-    num_images = min(k.item(), k_max)
+    # Visualize first sample in the batch
+    k_first = int(k[0].item())
+    num_images = min(k_first, k_max)
+
     if num_images > 0:
-        original_images = x_tensor.view(-1, k_max, 784)[:, :num_images].reshape(-1, 784)[:num_images]
-        reconstructed_images = output['x_recon'].view(-1, k_max, 784)[:, :num_images].reshape(-1, 784)[:num_images]
+        original_images = x_tensor[0].view(k_max, 784)[:num_images]
+        reconstructed_images = output['x_recon'][0].view(k_max, 784)[:num_images]
+
         save_path = os.path.normpath(os.path.join(save_dir, f'reconstruction_epoch_{epoch + 1}.png'))
         show_reconstruction(original_images, reconstructed_images, num_images=num_images, save_path=save_path)
     else:
-        print(f"[Epoch {epoch+1}] Skipping visualization: no clusters to display")
+        print(f"[Epoch {epoch + 1}] Skipping visualization: no clusters to display")
+
     # Log results
     epoch_results = {
         'Epoch': epoch + 1,
