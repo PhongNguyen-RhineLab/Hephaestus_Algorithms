@@ -42,40 +42,83 @@ def show_reconstruction(x, x_recon, num_images=10, save_path=None):
         print(f"Error in show_reconstruction: {e}")
 
 def prepare_cluster_batch(images, labels, k_max=10, n_max=50):
-    D = images.size(1)
-    k = torch.unique(labels).tolist()
-    k_count = len(k)
-    cluster_map = {label: [] for label in k}
-    for img, lbl in zip(images, labels):
-        cluster_map[lbl.item()].append(img)
+    """
+    Prepare centroids and cluster points per sample in a minibatch.
+    Returns:
+        centroids: (B, k_max, D)
+        clusters: list of length B, each is a list of tensors (points for each cluster)
+        k: (B,) tensor of number of clusters per sample
+    """
+    B, D = images.shape  # images: (B, D) already flattened
     centroids = []
-    clusters = [[]]
-    for label in k:
-        points = torch.stack(cluster_map[label])
-        centroid = points.mean(dim=0)
-        centroids.append(centroid)
-        clusters[0].append(points)
-    centroids = torch.stack(centroids).unsqueeze(0)
-    k_tensor = torch.tensor([k_count])
+    clusters = []
+    k_list = []
+
+    for b in range(B):
+        lbls = labels[b].unsqueeze(0)  # single label
+        img = images[b]
+
+        # since MNIST labels are single-class, we just make one cluster per image
+        # but if labels[b] is actually a vector of cluster assignments, handle multiple
+        unique_labels = torch.unique(lbls)
+        k_count = len(unique_labels)
+        k_list.append(k_count)
+
+        centroids_b = []
+        clusters_b = []
+        for ul in unique_labels:
+            points = img.unsqueeze(0)  # (1, D) since each sample has one label
+            centroid = points.mean(dim=0)
+            centroids_b.append(centroid)
+            clusters_b.append(points)
+
+        # pad centroids if less than k_max
+        while len(centroids_b) < k_max:
+            centroids_b.append(torch.zeros(D, device=images.device))
+            clusters_b.append(torch.zeros(0, D, device=images.device))
+
+        centroids.append(torch.stack(centroids_b[:k_max]))
+        clusters.append(clusters_b[:k_max])
+
+    centroids = torch.stack(centroids)  # (B, k_max, D)
+    k_tensor = torch.tensor(k_list, device=images.device)
     return centroids, clusters, k_tensor
 
+
 def process_cluster_data(centroids, cluster_points, k, k_max=10, n_max=50, D=784):
-    batch_size = centroids.size(0)
-    x_padded = F.pad(centroids, (0, 0, 0, k_max - centroids.size(1)))
-    x_tensor = x_padded.view(batch_size, -1)
-    cluster_data = torch.zeros(batch_size, k_max, n_max, D)
-    for b in range(batch_size):
+    """
+    Convert centroids + cluster data into tensors for CVAE.
+    centroids: (B, k_max, D)
+    cluster_points: list of length B, each with k_max entries of (n_i, D)
+    k: (B,)
+    """
+    B = centroids.size(0)
+
+    # Flatten centroids
+    x_tensor = centroids.view(B, -1)  # (B, k_max*D)
+
+    # Create padded cluster data
+    cluster_data = torch.zeros(B, k_max, n_max, D, device=centroids.device)
+    for b in range(B):
         for i in range(k[b]):
             points = cluster_points[b][i]
             n_i = min(points.size(0), n_max)
-            cluster_data[b, i, :n_i, :] = points[:n_i]
-    cluster_flat = cluster_data.view(batch_size, -1)
-    k_mask = torch.zeros(batch_size, k_max)
-    for b in range(batch_size):
+            if n_i > 0:
+                cluster_data[b, i, :n_i, :] = points[:n_i]
+
+    cluster_flat = cluster_data.view(B, -1)  # (B, k_max*n_max*D)
+
+    # Cluster mask + normalized cluster count
+    k_mask = torch.zeros(B, k_max, device=centroids.device)
+    for b in range(B):
         k_mask[b, :k[b]] = 1.0
-    k_real = k.float().unsqueeze(1) / k_max
-    c_tensor = torch.cat([cluster_flat, k_mask, k_real], dim=1)
+    k_real = k.float().unsqueeze(1) / k_max  # (B,1)
+
+    # Final condition tensor
+    c_tensor = torch.cat([cluster_flat, k_mask, k_real], dim=1)  # (B, cond_dim)
+
     return x_tensor, c_tensor
+
 
 def k_medians_cost(images, labels, centroids, k, k_max=10):
     """Calculate k-medians clustering cost based on the paper's definition."""
