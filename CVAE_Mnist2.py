@@ -187,26 +187,43 @@ def compute_total_k_medians_cost(data_loader, model, k_max, n_max, D, device):
     return total_cost
 
 
-def compute_ground_truth_cost(data_loader, k_max=10, device='cuda'):
-    """Compute k-medians cost using ground-truth centroids (mean of each class)."""
-    cluster_sums = {i: torch.zeros(784, device=device) for i in range(k_max)}
-    cluster_counts = {i: 0 for i in range(k_max)}
-    for images, labels in data_loader:
-        images, labels = images.to(device), labels.to(device)
+def compute_ground_truth_cost(data_loader, k_max, device, D=64):
+    # Use dynamic dimensionality instead of hardcoding 784
+    cluster_sums = [torch.zeros(D).to(device) for _ in range(k_max)]
+    cluster_counts = [0 for _ in range(k_max)]
+    all_labels = []
+    all_images = []
+
+    for batch in data_loader:
+        images, labels = batch
+        images = images.to(device)
+        all_labels.extend(labels.tolist())
+        all_images.append(images)
+
         for img, lbl in zip(images, labels):
-            lbl = lbl.item()
-            if lbl < k_max:
-                cluster_sums[lbl] += img
-                cluster_counts[lbl] += 1
-    centroids = torch.stack([cluster_sums[i] / max(cluster_counts[i], 1) for i in range(k_max)])
+            cluster_sums[lbl] += img
+            cluster_counts[lbl] += 1
+
+    # Compute cluster centers
+    cluster_means = []
+    for s, c in zip(cluster_sums, cluster_counts):
+        if c > 0:
+            cluster_means.append(s / c)
+        else:
+            cluster_means.append(torch.zeros(D).to(device))
+
+    # Stack
+    all_images = torch.cat(all_images, dim=0)
+    cluster_means = torch.stack(cluster_means)
+
+    # Compute ground-truth clustering cost (Euclidean distance to mean)
     cost = 0.0
-    with torch.no_grad():
-        for images, labels in data_loader:
-            images = images.to(device)
-            for img in images:
-                distances = torch.norm(centroids - img.unsqueeze(0), dim=1, p=2)
-                cost += torch.min(distances).item()
+    for img, lbl in zip(all_images, all_labels):
+        diff = img - cluster_means[lbl]
+        cost += torch.norm(diff, p=2).item()
+
     return cost
+
 
 class CVAE_Encoder(nn.Module):
     def __init__(self, input_dim, cond_dim, hidden_dim, latent_dim):
@@ -359,7 +376,7 @@ csv_path = os.path.normpath(os.path.join(save_dir, f'training_results_{datetime.
 results = []
 
 # Compute ground-truth cost once
-ground_truth_cost = compute_ground_truth_cost(train_loader, k_max, device)
+ground_truth_cost = compute_ground_truth_cost(train_loader, k_max, device, D)
 print(f"Ground-truth k-medians cost: {ground_truth_cost:.4f}")
 
 # Training loop
