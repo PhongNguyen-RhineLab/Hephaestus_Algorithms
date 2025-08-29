@@ -422,8 +422,8 @@ for epoch in range(100):  # Increased epochs
     num_images = min(k_first, k_max)
 
     if num_images > 0:
-        original_images = x_tensor[0].view(k_max, 784)[:num_images]
-        reconstructed_images = output['x_recon'][0].view(k_max, 784)[:num_images]
+        original_images = x_tensor[0].view(k_max, 64)[:num_images]
+        reconstructed_images = output['x_recon'][0].view(k_max, 64)[:num_images]
 
         save_path = os.path.normpath(os.path.join(save_dir, f'reconstruction_epoch_{epoch + 1}.png'))
         show_reconstruction(original_images, reconstructed_images, num_images=num_images, save_path=save_path)
