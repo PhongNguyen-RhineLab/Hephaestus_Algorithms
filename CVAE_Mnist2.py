@@ -10,36 +10,42 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import os
 import pandas as pd
+from sklearn.decomposition import PCA
 from datetime import datetime
 
 def show_reconstruction(x, x_recon, num_images=10, save_path=None):
-    try:
-        x = x.view(-1, 28, 28).detach().cpu().numpy()
-        x_recon = x_recon.view(-1, 28, 28).detach().cpu().numpy()
-        num_images = min(num_images, x.shape[0], x_recon.shape[0])
-        if num_images == 0:
-            print(f"Warning: No images to visualize (x.shape: {x.shape}, x_recon.shape: {x_recon.shape})")
-            return
-        plt.figure(figsize=(num_images * 2, 4))
-        for i in range(num_images):
-            plt.subplot(2, num_images, i + 1)
-            plt.imshow(x[i], cmap='gray')
-            plt.axis('off')
-            if i == 0:
-                plt.title("Original")
-            plt.subplot(2, num_images, i + 1 + num_images)
-            plt.imshow(x_recon[i], cmap='gray')
-            plt.axis('off')
-            if i == 0:
-                plt.title("Reconstructed")
-        plt.tight_layout()
-        if save_path:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            plt.savefig(save_path, bbox_inches='tight')
-            print(f"Saved image to {save_path}")
-        plt.close()
-    except Exception as e:
-        print(f"Error in show_reconstruction: {e}")
+    # Disable visualization for PCA features (not images)
+    print("Skipping visualization (PCA features, not images).")
+    return
+
+# def show_reconstruction(x, x_recon, num_images=10, save_path=None):
+#     try:
+#         x = x.view(-1, 28, 28).detach().cpu().numpy()
+#         x_recon = x_recon.view(-1, 28, 28).detach().cpu().numpy()
+#         num_images = min(num_images, x.shape[0], x_recon.shape[0])
+#         if num_images == 0:
+#             print(f"Warning: No images to visualize (x.shape: {x.shape}, x_recon.shape: {x_recon.shape})")
+#             return
+#         plt.figure(figsize=(num_images * 2, 4))
+#         for i in range(num_images):
+#             plt.subplot(2, num_images, i + 1)
+#             plt.imshow(x[i], cmap='gray')
+#             plt.axis('off')
+#             if i == 0:
+#                 plt.title("Original")
+#             plt.subplot(2, num_images, i + 1 + num_images)
+#             plt.imshow(x_recon[i], cmap='gray')
+#             plt.axis('off')
+#             if i == 0:
+#                 plt.title("Reconstructed")
+#         plt.tight_layout()
+#         if save_path:
+#             os.makedirs(os.path.dirname(save_path), exist_ok=True)
+#             plt.savefig(save_path, bbox_inches='tight')
+#             print(f"Saved image to {save_path}")
+#         plt.close()
+#     except Exception as e:
+#         print(f"Error in show_reconstruction: {e}")
 
 def prepare_cluster_batch(images, labels, k_max=10, n_max=50):
     """
@@ -68,7 +74,7 @@ def prepare_cluster_batch(images, labels, k_max=10, n_max=50):
         clusters_b = []
         for ul in unique_labels:
             points = img.unsqueeze(0)  # (1, D) since each sample has one label
-            centroid = points.mean(dim=0)
+            centroid = points.median(dim=0).values  # (D,)
             centroids_b.append(centroid)
             clusters_b.append(points)
 
@@ -151,7 +157,6 @@ def k_medians_cost(images, labels, centroids, k, k_max=10):
         # Euclidean distance from img to all centroids
         distances = torch.norm(valid_centroids - img.unsqueeze(0), dim=1, p=2)
         total_cost += torch.min(distances).item()
-
     return total_cost
 
 
@@ -304,19 +309,35 @@ def cvae_loss(x, output, beta=0.5):
     ) / x.size(0)
     return recon_loss + beta * kl, recon_loss, kl
 
-# Load MNIST
+# --- Load MNIST ---
 transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Lambda(lambda x: x.view(-1))
+    transforms.Lambda(lambda x: x.view(-1))  # flatten 28x28 → 784
 ])
+mnist_full = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
 
-mnist_train = datasets.MNIST(root='./data', train=True, transform=transform, download=True)
-train_loader = DataLoader(mnist_train, batch_size=256, shuffle=True)
+# --- Subset to 1797 samples ---
+m = 1797
+X = torch.stack([mnist_full[i][0] for i in range(m)])  # shape [1797, 784]
+y = torch.tensor([mnist_full[i][1] for i in range(m)]) # labels
 
-# Configuration
+# --- Apply PCA to 64 dimensions ---
+pca = PCA(n_components=64)
+X_pca = pca.fit_transform(X.numpy())  # shape [1797, 64]
+
+# --- Convert back to tensor ---
+X_tensor = torch.tensor(X_pca, dtype=torch.float32)
+y_tensor = y
+
+# --- Wrap into DataLoader ---
+dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
+train_loader = DataLoader(dataset, batch_size=256, shuffle=True)
+
+# --- Config (now d=64 instead of 784) ---
 k_max = 10
 n_max = 50
-D = 784
+D = 64   # <<<<<<<<<<<<<< CHANGED
+
 input_dim = k_max * D
 cond_dim = k_max * n_max * D + k_max + 1
 hidden_dim = 512
