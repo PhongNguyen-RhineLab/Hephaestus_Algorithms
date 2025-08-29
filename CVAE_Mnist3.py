@@ -215,7 +215,7 @@ class CVAE_Decoder(nn.Module):
     def forward(self, z, c):
         zc = torch.cat([z, c], dim=1)
         h = F.relu(self.fc1(zc))
-        return torch.sigmoid(self.fc_out(h))
+        return self.fc_out(h)   # raw real-valued outputs for standardized PCA features
 
 class CVAE(nn.Module):
     def __init__(self, input_dim, cond_dim, hidden_dim, latent_dim):
@@ -261,11 +261,16 @@ m = 1797
 X = torch.stack([mnist_full[i][0] for i in range(m)])  # (1797, 784)
 y_true = torch.tensor([mnist_full[i][1] for i in range(m)])  # ground-truth labels
 
-# PCA → 64D
+# PCA → 64D and STANDARDIZE (match paper)
+from sklearn.preprocessing import StandardScaler
+
 pca = PCA(n_components=64)
-X_pca = pca.fit_transform(X.numpy())
-X_tensor = torch.tensor(X_pca, dtype=torch.float32)
+X_pca = pca.fit_transform(X.numpy())            # (1797, 64)
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X_pca)          # zero mean, unit variance per dim
+X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
 y_true_tensor = y_true.clone()
+
 
 # ---------------------------
 # Config
@@ -313,18 +318,34 @@ for alpha in alphas:
     gt_loader = DataLoader(ds_true, batch_size=BATCH_SIZE, shuffle=False)
     pred_loader = DataLoader(ds_pred, batch_size=BATCH_SIZE, shuffle=False)
 
-    # Baseline costs (computed once per α)
-    with torch.no_grad():
-        OPT_cost = compute_cost_over_loader(
-            gt_loader,
-            centers_builder=lambda Xb, Lb: centers_from_ground_truth(Xb, Lb),
-            device=device, k_max=k_max
-        )
-        Predictor_cost = compute_cost_over_loader(
-            pred_loader,
-            centers_builder=lambda Xb, Lb: centers_from_predictor(Xb, Lb),
-            device=device, k_max=k_max
-        )
+    # Compute dataset-level medians & L1 costs (paper-style)
+    # Global GT medians (computed once)
+    def compute_global_label_medians(X, y, k_max=10):
+        D = X.shape[1]
+        medians = torch.zeros(k_max, D)
+        mask = torch.zeros(k_max, dtype=torch.bool)
+        for lbl in range(k_max):
+            pts = X[y == lbl]
+            if pts.shape[0] > 0:
+                medians[lbl] = pts.median(dim=0).values
+                mask[lbl] = True
+        return medians, mask
+
+    def total_l1_cost_to_centroids(X, medians, mask):
+        valid = medians[mask]
+        if valid.shape[0] == 0:
+            return 0.0
+        dists = torch.cdist(X, valid, p=1)
+        return dists.min(dim=1).values.sum().item()
+
+    # global GT medians & cost (global_OPT_cost computed once above if you want)
+    global_meds, global_mask = compute_global_label_medians(X_tensor, y_true_tensor, k_max)
+    OPT_cost = total_l1_cost_to_centroids(X_tensor, global_meds, global_mask)
+
+    # predictor global medians & predictor dataset-level cost
+    pred_meds, pred_mask = compute_global_label_medians(X_tensor, y_pred, k_max)
+    Predictor_cost = total_l1_cost_to_centroids(X_tensor, pred_meds, pred_mask)
+
     print(f"[α={alpha:.1f}] OPT (GT centers) cost: {OPT_cost:.4f}")
     print(f"[α={alpha:.1f}] Predictor (noisy) cost: {Predictor_cost:.4f}")
 
