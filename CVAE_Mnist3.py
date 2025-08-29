@@ -11,7 +11,6 @@ import matplotlib.pyplot as plt
 import os
 import pandas as pd
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
 from datetime import datetime
 import random
 
@@ -252,35 +251,25 @@ def cvae_loss(x, output, beta=0.5):
 # ---------------------------
 set_seed(42)
 
-# --- Load MNIST ---
 transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Lambda(lambda x: x.view(-1))  # flatten 28x28 → 784
+    transforms.Lambda(lambda x: x.view(-1))
 ])
 mnist_full = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
 
-# --- Subset to 1797 samples (as in paper) ---
 m = 1797
-X = torch.stack([mnist_full[i][0] for i in range(m)])  # [1797, 784]
-y = torch.tensor([mnist_full[i][1] for i in range(m)]) # labels
+X = torch.stack([mnist_full[i][0] for i in range(m)])  # (1797, 784)
+y_true = torch.tensor([mnist_full[i][1] for i in range(m)])  # ground-truth labels
 
-# --- Apply PCA (64 dims) ---
+# PCA → 64D
 pca = PCA(n_components=64)
-X_pca = pca.fit_transform(X.numpy())  # [1797, 64]
+X_pca = pca.fit_transform(X.numpy())
+X_tensor = torch.tensor(X_pca, dtype=torch.float32)
+y_true_tensor = y_true.clone()
 
-# --- Standardize features (critical for fair L1 distances) ---
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X_pca)
-
-# --- Convert back to tensor ---
-X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
-y_tensor = y
-
-# --- Wrap into DataLoader ---
-dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
-train_loader = DataLoader(dataset, batch_size=256, shuffle=True)
-
-# --- Config (64D) ---
+# ---------------------------
+# Config
+# ---------------------------
 k_max = 10
 n_max = 50
 D = 64
@@ -291,32 +280,6 @@ hidden_dim = 512
 latent_dim = 64
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = CVAE(input_dim, cond_dim, hidden_dim, latent_dim).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=2e-4)
-scheduler = StepLR(optimizer, step_size=20, gamma=0.5)
-
-# --- Compute OPT cost (dataset-level medians, standardized features) ---
-def compute_global_label_medians(X, y, k_max=10):
-    D = X.shape[1]
-    medians = torch.zeros(k_max, D)
-    mask = torch.zeros(k_max, dtype=torch.bool)
-    for lbl in range(k_max):
-        pts = X[y == lbl]
-        if pts.shape[0] > 0:
-            medians[lbl] = pts.median(dim=0).values
-            mask[lbl] = True
-    return medians, mask
-
-def total_l1_cost_to_centroids(X, medians, mask):
-    valid = medians[mask]
-    if valid.shape[0] == 0:
-        return 0.0
-    dists = torch.cdist(X, valid, p=1)   # L1 distance
-    return dists.min(dim=1).values.sum().item()
-
-global_meds, mask = compute_global_label_medians(X_tensor, y_tensor, k_max)
-global_OPT_cost = total_l1_cost_to_centroids(X_tensor, global_meds, mask)
-print(f"Global OPT k-medians cost (standardized PCA features): {global_OPT_cost:.4f}")
 
 # ---------------------------
 # Output & logging
@@ -338,27 +301,32 @@ BATCH_SIZE = 256
 
 for alpha in alphas:
     print(f"\n=== Running α = {alpha:.1f} ===")
-    # Predictor labels (use y_tensor, not undefined y_true_tensor)
-    y_pred = flip_labels(y_tensor, alpha=alpha, num_classes=10, seed=1234)
+    # Predictor labels
+    y_pred = flip_labels(y_true_tensor, alpha=alpha, num_classes=10, seed=1234)
 
-    # Build dataset objects for training CVAE (still use predictor labels for conditioning)
+    # Dataloaders:
+    #   - train/eval for CVAE use predictor labels (learning-augmented conditioning)
+    #   - We also keep a loader with ground-truth labels for OPT when needed
     ds_pred = torch.utils.data.TensorDataset(X_tensor, y_pred)
-    ds_true = torch.utils.data.TensorDataset(X_tensor, y_tensor)
+    ds_true = torch.utils.data.TensorDataset(X_tensor, y_true_tensor)
     train_loader = DataLoader(ds_pred, batch_size=BATCH_SIZE, shuffle=True)
     gt_loader = DataLoader(ds_true, batch_size=BATCH_SIZE, shuffle=False)
     pred_loader = DataLoader(ds_pred, batch_size=BATCH_SIZE, shuffle=False)
 
-    # --- Compute dataset-level (global) medians and costs (the paper-style OPT & Predictor baselines) ---
-    # global_meds, mask already computed for GT above (global_meds, mask)
-    # But recompute predictor global medians for this alpha:
-    pred_meds, pred_mask = compute_global_label_medians(X_tensor, y_pred, k_max)
-    # dataset-level OPT (GT medians) we already computed as global_OPT_cost earlier
-    OPT_cost = global_OPT_cost
-    Predictor_cost = total_l1_cost_to_centroids(X_tensor, pred_meds, pred_mask)
-
-    print(f"[α={alpha:.1f}] OPT (GT centers) cost (dataset-level): {OPT_cost:.4f}")
-    print(f"[α={alpha:.1f}] Predictor (noisy) cost (dataset-level): {Predictor_cost:.4f}")
-
+    # Baseline costs (computed once per α)
+    with torch.no_grad():
+        OPT_cost = compute_cost_over_loader(
+            gt_loader,
+            centers_builder=lambda Xb, Lb: centers_from_ground_truth(Xb, Lb),
+            device=device, k_max=k_max
+        )
+        Predictor_cost = compute_cost_over_loader(
+            pred_loader,
+            centers_builder=lambda Xb, Lb: centers_from_predictor(Xb, Lb),
+            device=device, k_max=k_max
+        )
+    print(f"[α={alpha:.1f}] OPT (GT centers) cost: {OPT_cost:.4f}")
+    print(f"[α={alpha:.1f}] Predictor (noisy) cost: {Predictor_cost:.4f}")
 
     # Initialize a *fresh* CVAE per α (fair)
     model = CVAE(input_dim=input_dim, cond_dim=cond_dim, hidden_dim=hidden_dim, latent_dim=latent_dim).to(device)
@@ -392,39 +360,20 @@ for alpha in alphas:
 
         scheduler.step()
 
-        # Evaluate CVAE cost this epoch using *global* predictor medians (dataset-level evaluation)
+        # Evaluate CVAE cost this epoch: reconstruct batch centroids then cost on images
         model.eval()
         with torch.no_grad():
-            # Build global cluster condition from full dataset & predictor labels (one-shot)
-            # Build 'x' and 'c' representing global predictor medians + samples (n_max per cluster)
-            def build_c_from_global_clusters(X_all, y_pred_all, pred_meds, k_max=10, n_max=50):
-                D = X_all.shape[1]
-                device = X_all.device
-                cluster_data = torch.zeros(k_max, n_max, D, device=device)
-                for i in range(k_max):
-                    pts = X_all[y_pred_all == i]
-                    if pts.shape[0] > 0:
-                        n_i = min(pts.shape[0], n_max)
-                        cluster_data[i, :n_i] = pts[:n_i]
-                cluster_flat = cluster_data.reshape(-1).unsqueeze(0)  # (1, k_max*n_max*D)
-                k_mask = (pred_meds.abs().sum(dim=1) > 0).float().unsqueeze(0)  # (1, k_max)
-                k_present = int(k_mask.sum().item())
-                k_real = torch.full((1, 1), fill_value=k_present / k_max, device=pred_meds.device)
-                c_tensor = torch.cat([cluster_flat, k_mask, k_real], dim=1)
-                x_tensor = pred_meds.reshape(-1).unsqueeze(0)  # (1, k_max*D)
-                return x_tensor.to(device), c_tensor.to(device), k_present
-
-
-            # Use the full dataset X_tensor and y_pred (on CPU) to build global pred_meds (we computed pred_meds above)
-            # Make sure tensors are on the model device
-            x_g, c_g, k_pred_present = build_c_from_global_clusters(X_tensor.to(device), y_pred.to(device),
-                                                                    pred_meds.to(device), k_max=k_max, n_max=n_max)
-            out_global = model(x_g, c_g)
-            recon_global = out_global['x_recon'][0].view(k_max, D).cpu()  # (k_max, D) on CPU
-
-            # Compute dataset-level L1 cost from all points to recon_global medians (only for present clusters)
-            mask_present = (pred_meds.abs().sum(dim=1) > 0)
-            cvae_cost_epoch = total_l1_cost_to_centroids(X_tensor, recon_global, mask_present)
+            cvae_cost_epoch = 0.0
+            for images_eval, pred_labels_eval in pred_loader:
+                images_eval = images_eval.to(device)
+                pred_labels_eval = pred_labels_eval.to(device)
+                # Build (x, c) for this eval batch (predictor clusters)
+                x_eval, c_eval, k_eval = prepare_cluster_batch_from_predictor(images_eval, pred_labels_eval, k_max=k_max, n_max=n_max)
+                out_eval = model(x_eval.to(device), c_eval.to(device))
+                # Decode centroids & measure cost to nearest of k_eval centers
+                x_recon = out_eval['x_recon'][0]  # any row (same for entire batch)
+                k_present = int(k_eval[0].item())
+                cvae_cost_epoch += k_medians_cost(images_eval, x_recon, k_present, k_max=k_max)
 
         row = {
             'Alpha': alpha,
@@ -441,7 +390,7 @@ for alpha in alphas:
         if (epoch + 1) % 5 == 0 or epoch == 0:
             print(f"[α={alpha:.1f} | Epoch {epoch+1:03d}] "
                   f"Loss {row['Train_Total_Loss']:.4f} | Recon {row['Train_Recon_Loss']:.4f} | KL {row['Train_KL_Loss']:.4f} | "
-                  f"CVAE Cost {row['CVAE_Cost']:.4f} | OPT {OPT_cost:.4f} | Pred {Predictor_cost:.4f}")
+                  f"CVAE Cost {row['CVAE_Cost']:.4f} | OPT {OPT_cost:.4f} | Pred {Predictor_Cost:.4f}")
 
     # Save per-α logs and also final summary point (last-epoch CVAE cost)
     df_alpha = pd.DataFrame(log_rows)
@@ -452,7 +401,7 @@ for alpha in alphas:
 
     final_cvae_cost = df_alpha.iloc[-1]['CVAE_Cost']
     summary_rows.append({'Alpha': alpha, 'OPT_Cost': OPT_cost,
-                         'Predictor_Cost': Predictor_cost, 'CVAE_Cost': final_cvae_cost})
+                         'Predictor_Cost': Predictor_Cost, 'CVAE_Cost': final_cvae_cost})
 
 # Save summary (cost vs α)
 summary_df = pd.DataFrame(summary_rows).sort_values('Alpha')
@@ -468,8 +417,8 @@ try:
     plt.plot(summary_df['Alpha'], summary_df['Predictor_Cost'], marker='o', label='Predictor (Noisy)')
     plt.plot(summary_df['Alpha'], summary_df['CVAE_Cost'], marker='o', label='CVAE (Ours)')
     plt.xlabel('Predictor error rate α')
-    plt.ylabel('Clustering cost (L1 / k-medians)')
-    plt.title('k-Medians cost vs α on MNIST PCA(64), m=1797 (standardized)')
+    plt.ylabel('Clustering cost (Euclidean)')
+    plt.title('Cost vs α on MNIST PCA(64), m=1797')
     plt.legend()
     plot_path = os.path.join(save_dir, f'cost_vs_alpha_{timestamp}.png')
     plt.tight_layout()
