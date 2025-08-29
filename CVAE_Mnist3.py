@@ -390,7 +390,7 @@ for alpha in alphas:
         if (epoch + 1) % 5 == 0 or epoch == 0:
             print(f"[α={alpha:.1f} | Epoch {epoch+1:03d}] "
                   f"Loss {row['Train_Total_Loss']:.4f} | Recon {row['Train_Recon_Loss']:.4f} | KL {row['Train_KL_Loss']:.4f} | "
-                  f"CVAE Cost {row['CVAE_Cost']:.4f} | OPT {OPT_cost:.4f} | Pred {Predictor_Cost:.4f}")
+                  f"CVAE Cost {row['CVAE_Cost']:.4f} | OPT {OPT_cost:.4f} | Pred {Predictor_cost:.4f}")
 
     # Save per-α logs and also final summary point (last-epoch CVAE cost)
     df_alpha = pd.DataFrame(log_rows)
@@ -401,7 +401,7 @@ for alpha in alphas:
 
     final_cvae_cost = df_alpha.iloc[-1]['CVAE_Cost']
     summary_rows.append({'Alpha': alpha, 'OPT_Cost': OPT_cost,
-                         'Predictor_Cost': Predictor_Cost, 'CVAE_Cost': final_cvae_cost})
+                         'Predictor_Cost': Predictor_cost, 'CVAE_Cost': final_cvae_cost})
 
 # Save summary (cost vs α)
 summary_df = pd.DataFrame(summary_rows).sort_values('Alpha')
