@@ -301,7 +301,7 @@ summary_rows = []
 # Alpha sweep like the paper
 # ---------------------------
 alphas = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]  # you can change this to match their plots exactly
-EPOCHS = 100
+EPOCHS = 200
 BATCH_SIZE = 256
 
 for alpha in alphas:
@@ -438,7 +438,7 @@ try:
     plt.plot(summary_df['Alpha'], summary_df['Predictor_Cost'], marker='o', label='Predictor (Noisy)')
     plt.plot(summary_df['Alpha'], summary_df['CVAE_Cost'], marker='o', label='CVAE (Ours)')
     plt.xlabel('Predictor error rate α')
-    plt.ylabel('Clustering cost (Euclidean)')
+    plt.ylabel('Clustering cost (Manhattan)')
     plt.title('Cost vs α on MNIST PCA(64), m=1797')
     plt.legend()
     plot_path = os.path.join(save_dir, f'cost_vs_alpha_{timestamp}.png')
